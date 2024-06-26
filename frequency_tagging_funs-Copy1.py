@@ -1,6 +1,5 @@
 # Functions for the frequency tagging condition of the experiment 1 
 import scipy
-import copy
 import numpy as np
 
 def coherence_kabir(signalX, pick, freq_of_interest):
@@ -92,67 +91,39 @@ def snr_spectrum(psd, noise_n_neighbor_freqs=1, noise_skip_neighbor_freqs=1):
     return psd / mean_noise
 
 
-def ssvep_amplitudes(epochs, electrodes, tmin, tmax):
+def ssvep_amplitudes(epochs, queries, frequencies, electrodes, tmin, tmax):
     '''
     For each condition in queries, each trial and electrode, return the complex Fourier coefficient
-
-    based on the method in in Chota, Bruat, Stigchel & Strauch 2023
     '''
+    n_points = 2**14
+    ssvep_amp = {cond: [] for cond in queries}
     
-    # Calculate FFT over trial-averaged signal
-    data = epochs.copy().crop(tmin=tmin, tmax=tmax).pick(electrodes).average().get_data()
+    for condition in queries:
+        # Calculate FFT over trial-averaged signal
+        data =  epochs[condition].copy().crop(tmin=tmin, tmax=tmax).pick(electrodes).average().get_data()
+        
+        # Zero-pad the data to increase freq resolution and faster computation (power of 2)
+        padded_data = np.zeros((len(electrodes), n_points))
+        padded_data[:, :data.shape[1]] = data
+        
+        # Compute FFT
+        fft_results = np.fft.fft(padded_data, axis=1)
+        
+        # Calculate the amplitude of the complex Fourier coefficients
+        amplitudes = np.abs(fft_results)
+        
+        # Store the amplitudes for each frequency of interest
+        all_freqs = []
+        for i, freq in enumerate(frequencies):
+            freq_index = int(freq * n_points / epochs.info['sfreq'])
+            all_freqs.append(amplitudes[:, freq_index])
+        
+        ssvep_amp[condition].append(np.array(all_freqs).T)
 
-    # Zero-pad the data to increase freq resolution and faster computation (power of 2)
-    padded_data = np.zeros((len(electrodes), 2**15))
-    padded_data[:, :data.shape[1]] = data
-    # For all electrodes
-    N = padded_data.shape[-1]
-    fft_values = np.fft.fft(padded_data, axis=-1)
-    fft_freq = np.fft.fftfreq(N, 1/epochs.info['sfreq'])
-    
-    # Only keep the positive frequencies (fourier coefficients)
-    positive_freq_indices = np.where(fft_freq >= 0)
-    fft_freq = fft_freq[positive_freq_indices]
-    fft_values = fft_values[:,positive_freq_indices]
-    
-    # Compute the magnitude of the FFT
-    fft_magnitude = np.abs(fft_values)**2
-
-    return fft_freq, fft_magnitude.squeeze()
-    
-# def ssvep_amplitudes(epochs, queries, frequencies, electrode, tmin, tmax):
-#     '''
-#     For each condition in queries, each trial and electrode, return the complex Fourier coefficient
-#     '''
-#     n_points = 2**14
-#     ssvep_amp = {cond: [] for cond in queries}
-    
-#     for condition in queries:
-#         # Calculate FFT over trial-averaged signal
-#         data =  epochs[condition].copy().crop(tmin=tmin, tmax=tmax).pick(electrode).average().get_data()
-        
-#         # Zero-pad the data to increase freq resolution and faster computation (power of 2)
-#         padded_data = np.zeros((len(electrodes), n_points))
-#         padded_data[:, :data.shape[1]] = data
-        
-#         # Compute FFT
-#         fft_results = np.fft.fft(padded_data, axis=1)
-        
-#         # Calculate the amplitude of the complex Fourier coefficients
-#         amplitudes = np.abs(fft_results)
-        
-#         # Store the amplitudes for each frequency of interest
-#         all_freqs = []
-#         for i, freq in enumerate(frequencies):
-#             freq_index = int(freq * n_points / epochs.info['sfreq'])
-#             all_freqs.append(amplitudes[:, freq_index])
-        
-#         ssvep_amp[condition].append(np.array(all_freqs).T)
-
-#     # Convert lists to arrays
-#     for condition in queries:
-#              ssvep_amp[condition] = np.array(ssvep_amp[condition][0])
-#     return ssvep_amp
+    # Convert lists to arrays
+    for condition in queries:
+             ssvep_amp[condition] = np.array(ssvep_amp[condition][0])
+    return ssvep_amp
 
 
 def frequency_rescaling(A):
