@@ -2,6 +2,13 @@
 import scipy
 import copy
 import numpy as np
+import pandas as pd
+from sklearn.linear_model import LogisticRegression
+from sklearn.pipeline import make_pipeline
+from sklearn.metrics import roc_auc_score
+from sklearn.preprocessing import StandardScaler
+from sklearn.model_selection import StratifiedKFold
+from mne.decoding import SlidingEstimator, cross_val_multiscore
 
 def coherence_kabir(signalX, pick, freq_of_interest):
 
@@ -9,38 +16,37 @@ def coherence_kabir(signalX, pick, freq_of_interest):
     min_time = signalX.times[0]
     max_time = signalX.times[-1]
     sampling_rate = signalX.info['sfreq']
-    
-    # Band-pass EEG (+/-1.9Hz) and apply hilbert
-    signalX = signalX.copy().pick(pick).filter(l_freq=freq_of_interest - .5, h_freq=freq_of_interest + .5,
-        method='iir', iir_params=dict(order=4, ftype='butter'), phase='zero', fir_window='hamming', verbose = False)
-    #filter(l_freq = freq_of_interest - 1.9, h_freq = freq_of_interest + 1.9, verbose=True)
-    
-    signalX = np.squeeze(signalX.get_data(copy=False)).T
-    signalXh =  scipy.signal.hilbert(signalX, axis=1)
-    n = signalXh.shape[1]  # number of trials
+    n = len(signalX)  # number of trials
+
+    # Band-pass EEG (+/-1Hz) and apply hilbert
+    signalX = signalX.copy().pick(pick).filter(l_freq=freq_of_interest - 1, h_freq=freq_of_interest + 1,
+        method='iir', iir_params=dict(order=4, ftype='butter'), verbose = False).get_data(copy=False)
+    signalX = np.squeeze(signalX).T
+    signalXh = scipy.signal.hilbert(signalX, axis=0)
 
     #Create sine wave
-    t = np.linspace(min_time, max_time, int(sampling_rate * (np.abs(min_time) + max_time))+1, endpoint=False)
+    t = np.linspace(min_time, max_time, int(sampling_rate* (np.abs(min_time) + max_time)+1))
     signalY = np.sin(2 * np.pi * freq_of_interest * t)
-    signalY = np.tile(signalY, (n,1)).T #repeat over trials
+    signalY = np.tile(signalY, (n,1)) #repeat over trials
+    
     # Hilbert transform
-    signalYh = scipy.signal.hilbert(signalY.T, axis=1)
+    signalYh = scipy.signal.hilbert(signalY.T, axis=0)
 
     # Magnitude
     mX = np.abs(signalXh).T
-    mY = np.abs(signalYh)
+    mY = np.abs(signalYh).T
 
     # Phase difference
-    phase_diff = np.angle(signalXh).T - np.angle(signalYh)
-
-    coh = np.zeros(signalY.shape[0])
-    for t in range(signalY.shape[0]):
+    phase_diff = np.angle(signalXh).T - np.angle(signalYh).T
+    
+    coh = np.zeros(signalY.shape[1])
+    for t in range(signalY.shape[1]):
         num = ((np.abs(np.sum(mX[:, t] * mY[:, t] * np.exp(1j * phase_diff[:, t])) / n)) ** 2)
         denom = (np.sum((mX[:, t]**2) * (mY[:, t]**2)) / n)
         coh[t] = num/denom
         
     return coh
-
+    
 def snr_spectrum(psd, noise_n_neighbor_freqs=1, noise_skip_neighbor_freqs=1):
     """
     # Signal to noise ratio (Meigen & Bach (1999))
@@ -119,53 +125,90 @@ def ssvep_amplitudes(epochs, electrodes, tmin, tmax):
     fft_magnitude = np.abs(fft_values)**2
 
     return fft_freq, fft_magnitude.squeeze()
-    
-# def ssvep_amplitudes(epochs, queries, frequencies, electrode, tmin, tmax):
-#     '''
-#     For each condition in queries, each trial and electrode, return the complex Fourier coefficient
-#     '''
-#     n_points = 2**14
-#     ssvep_amp = {cond: [] for cond in queries}
-    
-#     for condition in queries:
-#         # Calculate FFT over trial-averaged signal
-#         data =  epochs[condition].copy().crop(tmin=tmin, tmax=tmax).pick(electrode).average().get_data()
-        
-#         # Zero-pad the data to increase freq resolution and faster computation (power of 2)
-#         padded_data = np.zeros((len(electrodes), n_points))
-#         padded_data[:, :data.shape[1]] = data
-        
-#         # Compute FFT
-#         fft_results = np.fft.fft(padded_data, axis=1)
-        
-#         # Calculate the amplitude of the complex Fourier coefficients
-#         amplitudes = np.abs(fft_results)
-        
-#         # Store the amplitudes for each frequency of interest
-#         all_freqs = []
-#         for i, freq in enumerate(frequencies):
-#             freq_index = int(freq * n_points / epochs.info['sfreq'])
-#             all_freqs.append(amplitudes[:, freq_index])
-        
-#         ssvep_amp[condition].append(np.array(all_freqs).T)
 
-#     # Convert lists to arrays
-#     for condition in queries:
-#              ssvep_amp[condition] = np.array(ssvep_amp[condition][0])
-#     return ssvep_amp
-
-
-def frequency_rescaling(A):
+def model_training(epochs, tmin_training,tmax_training,tmin_prediction,tmax_prediction):
     '''
-    Rescale frequency for statistical analysis as in Adamian & Andersen, 2024
-    object is PSD, shape is frequency, cueing condition
+    Function to train on a given period and test on another.
+    tmax_training and tmin_training are used for training the model
+    tmax_prediciton and tmin_prediciton are used for prediction only based on the best training time
     '''
-    normalized_Ajk = np.zeros(A.shape)
-    for electrode in range(A.shape[1]):
-        # Average across cueing condition
-        mean_Ajk = np.mean(A[:,electrode])
+    epochs_posttraining = epochs.copy().crop(tmin=tmin_training, tmax=tmax_training)
+    epochs_pretraining = epochs.copy().crop(tmin=tmin_prediction, tmax=tmax_prediction ).copy()
     
-        # Divide each amplitude Ajk by the mean frequency for all cueing condition
-        normalized_Ajk[:,electrode] = A[:,electrode] / mean_Ajk
+    # Data and label to train on (predicting side that was cued)
+    X = epochs_posttraining.copy().get_data()
+    y = epochs_posttraining.metadata['cued'].values
+    
+    # Model fitting with logistic regression, using 5 CV
+    clf = make_pipeline(StandardScaler(), LogisticRegression(solver="liblinear"))
+    time_decod = SlidingEstimator(clf, n_jobs=5, scoring="roc_auc", verbose=True)
+    scores = cross_val_multiscore(time_decod, X, y, cv=5, n_jobs=5)
+    
+    # Find the best time point during training period, first average scores over splits and pick max score
+    mean_scores = np.mean(scores, axis=0)
+    best_time_idx = np.argmax(mean_scores)
+    best_time = epochs_posttraining.times[best_time_idx]
+    best_score = mean_scores[best_time_idx]
+    print(f"Best time point post-250ms: {best_time} seconds with score: {best_score}")
+    
+    # Re-train the model on the best time during the training period only
+    best_time_data = X[:, :, best_time_idx]
+    clf_best = make_pipeline(StandardScaler(), LogisticRegression(solver="liblinear"))
+    clf_best.fit(best_time_data, y)
+    
+    # Evaluate the model on data for each time point during prediction period separately for endo and exo
+    exo = epochs_pretraining['condition=="exo"'].copy()
+    endo = epochs_pretraining['condition=="endo"'].copy()
+    # Automatically perform kfold
+    skf = StratifiedKFold(n_splits=5, shuffle=True)
+    cv_scores_pretraining_exo = []
+    cv_scores_pretraining_endo = []
+    
+    # Iterate through each time point in the prediction period
+    for t in range(len(exo.times)):
+        X_pretraining_exo = exo.get_data()[:, :, t]
+        X_pretraining_endo = endo.get_data()[:, :, t]
+        y_exo = exo.metadata['cued'].values
+        y_endo = endo.metadata['cued'].values
+        fold_scores_exo = []
+        fold_scores_endo = []
+        
+        # Iterate through each fold of cross-validation
+        for train_index, test_index in skf.split(X_pretraining_exo, y_exo):
+            X_train, X_test = X_pretraining_exo[train_index], X_pretraining_exo[test_index]
+            y_train, y_test = y_exo[train_index], y_exo[test_index]
+            
+            # Use the previously trained model to predict the time point data in the prediction period
+            predictions = clf_best.predict(X_pretraining_exo[test_index])
+            score_exo = roc_auc_score(y_test, predictions)
+            fold_scores_exo.append(score_exo)
+        # Average score across folds for this time point
+        avg_score_exo = np.mean(fold_scores_exo, axis=-1)
+        cv_scores_pretraining_exo.append(avg_score_exo)
+        
+        # Same for endo
+        for train_index, test_index in skf.split(X_pretraining_endo, y_endo):
+            X_train, X_test = X_pretraining_endo[train_index], X_pretraining_endo[test_index]
+            y_train, y_test = y_endo[train_index], y_endo[test_index]
+            
+            predictions = clf_best.predict(X_pretraining_endo[test_index])
+            score_endo = roc_auc_score(y_test, predictions)
+            fold_scores_endo.append(score_endo)
+        
+        avg_score_endo = np.mean(fold_scores_endo, axis=-1)
+        cv_scores_pretraining_endo.append(avg_score_endo)
 
-    return normalized_Ajk
+    cv_scores_pretraining_exo = np.array(cv_scores_pretraining_exo)
+    cv_scores_pretraining_endo = np.array(cv_scores_pretraining_endo)
+    
+    # Make all scores > .50 as there are only two labels
+    cv_scores_pretraining_exo = np.abs(cv_scores_pretraining_exo - .5)+.5
+    cv_scores_pretraining_endo = np.abs(cv_scores_pretraining_endo - .5)+.5
+
+    pd_prediction = pd.DataFrame({'exo':cv_scores_pretraining_exo,
+                     'endo':cv_scores_pretraining_endo,
+                     'time':epochs_pretraining.times})
+    pd_prediction = pd_prediction.melt(id_vars='time')
+    pd_prediction.columns = ['time', 'attention', 'score']
+    pd_prediction['best_time'] = best_time
+    return pd_prediction
