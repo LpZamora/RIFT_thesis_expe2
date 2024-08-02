@@ -1,4 +1,4 @@
-# Functions for the frequency tagging condition of the experiment 1 
+# Functions for the frequency tagging condition of the experiment 2
 import scipy
 import copy
 import numpy as np
@@ -18,8 +18,8 @@ def coherence_kabir(signalX, pick, freq_of_interest):
     sampling_rate = signalX.info['sfreq']
     n = len(signalX)  # number of trials
 
-    # Band-pass EEG (+/-1Hz) and apply hilbert
-    signalX = signalX.copy().pick(pick).filter(l_freq=freq_of_interest - 1, h_freq=freq_of_interest + 1,
+    # Band-pass EEG (+/-1.9Hz) and apply hilbert
+    signalX = signalX.copy().pick(pick).filter(l_freq=freq_of_interest - 1.9, h_freq=freq_of_interest + 1.9,
         method='iir', iir_params=dict(order=4, ftype='butter'), verbose = False).get_data(copy=False)
     signalX = np.squeeze(signalX).T
     signalXh = scipy.signal.hilbert(signalX, axis=0)
@@ -211,4 +211,4 @@ def model_training(epochs, tmin_training,tmax_training,tmin_prediction,tmax_pred
     pd_prediction = pd_prediction.melt(id_vars='time')
     pd_prediction.columns = ['time', 'attention', 'score']
     pd_prediction['best_time'] = best_time
-    return pd_prediction
+    return pd_prediction, clf_best
